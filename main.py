@@ -105,19 +105,96 @@ def extract_pronunciation(soup):
         return match.group(1)
     return None
 
+def normalize_term(term):
+    """Normalise un terme pour la comparaison (sans accents, majuscules)."""
+    import unicodedata
+    normalized = unicodedata.normalize('NFD', term)
+    without_accents = ''.join(c for c in normalized if unicodedata.category(c) != 'Mn')
+    return without_accents.upper()
+
+def search_in_acronyms(term, headers):
+    """Cherche le terme dans la liste des acronymes USITO."""
+    first_letter = term[0].upper()
+    url = f"https://usito.usherbrooke.ca/index/asas/acronymes/{first_letter}"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException:
+        return None
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    normalized_term = normalize_term(term)
+    
+    for link in soup.find_all('a'):
+        href = link.get('href', '')
+        link_text = link.get_text(strip=True)
+        
+        if normalize_term(link_text) == normalized_term and '/annexes/acronymes/' in href:
+            parent = link.parent
+            if parent:
+                full_text = parent.get_text(separator=' ', strip=True)
+                definition_match = re.search(rf'{re.escape(link_text)}\s+(.+)', full_text, re.IGNORECASE)
+                if definition_match:
+                    definition = definition_match.group(1).strip()
+                    return {
+                        "success": True,
+                        "terme": link_text,
+                        "type": "acronyme",
+                        "definition": definition,
+                        "url": f"https://usito.usherbrooke.ca{href}"
+                    }
+    
+    return None
+
+def search_in_sigles(term, headers):
+    """Cherche le terme dans la liste des sigles USITO."""
+    first_letter = term[0].upper()
+    url = f"https://usito.usherbrooke.ca/index/asas/sigles/{first_letter}"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException:
+        return None
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    normalized_term = normalize_term(term)
+    
+    for link in soup.find_all('a'):
+        href = link.get('href', '')
+        link_text = link.get_text(strip=True)
+        
+        if normalize_term(link_text) == normalized_term and '/annexes/' in href:
+            parent = link.parent
+            if parent:
+                full_text = parent.get_text(separator=' ', strip=True)
+                definition_match = re.search(rf'{re.escape(link_text)}\s+(.+)', full_text, re.IGNORECASE)
+                if definition_match:
+                    definition = definition_match.group(1).strip()
+                    return {
+                        "success": True,
+                        "terme": link_text,
+                        "type": "sigle",
+                        "definition": definition,
+                        "url": f"https://usito.usherbrooke.ca{href}"
+                    }
+    
+    return None
+
 def scrape_usito(abbreviation):
     """
     Scrape the USITO dictionary for a given abbreviation/term.
     Returns structured and clean data.
     """
-    encoded_term = quote(abbreviation, safe='')
-    url = f"https://usito.usherbrooke.ca/définitions/{encoded_term}"
-    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
     }
+    
+    encoded_term = quote(abbreviation, safe='')
+    url = f"https://usito.usherbrooke.ca/définitions/{encoded_term}"
     
     try:
         response = requests.get(url, headers=headers, timeout=10)
@@ -161,7 +238,15 @@ def scrape_usito(abbreviation):
         result["synonymes"] = synonyms
     
     if "definition" not in result:
-        result["message"] = "Terme non trouve ou definition non disponible dans le dictionnaire USITO"
+        acronym_result = search_in_acronyms(abbreviation, headers)
+        if acronym_result:
+            return acronym_result
+        
+        sigle_result = search_in_sigles(abbreviation, headers)
+        if sigle_result:
+            return sigle_result
+        
+        result["message"] = "Terme non trouve dans le dictionnaire USITO"
         result["success"] = False
     
     return result
@@ -177,10 +262,10 @@ def home():
             "parameter": "abreviation",
             "exemple": "/recherche?abreviation=ONG"
         },
-        "description": "Cette API permet de rechercher des abreviations et leurs definitions dans le dictionnaire USITO de l'Universite de Sherbrooke.",
+        "description": "Cette API permet de rechercher des abreviations, acronymes et sigles dans le dictionnaire USITO de l'Universite de Sherbrooke.",
         "champs_retournes": [
             "terme", "definition", "prononciation", "grammaire", 
-            "etymologie", "exemple", "synonymes"
+            "etymologie", "exemple", "synonymes", "type"
         ]
     })
 
