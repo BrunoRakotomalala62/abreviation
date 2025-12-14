@@ -3,25 +3,171 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote
 import re
+import unicodedata
 
 app = Flask(__name__)
 
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+}
+
 def clean_text(text):
-    """Nettoie le texte en supprimant les infobulles et le bruit."""
+    """Nettoie le texte."""
     if not text:
         return ""
     text = re.sub(r'infobulle[a-z_]*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\d{3}\s*Informations[^.]*\.', '', text)
     text = re.sub(r'infoLexico[^.]*\.?', '', text)
-    text = re.sub(r'definition_entree[^(]*\([^)]*\)', '', text)
-    text = re.sub(r'in_GDT\s*in\s*GDT\s*in\s*Grand.*?CRIFUQ\)\.\s*Site du GDT\s*\(\s*in\s*GDT\s*\)', '', text, flags=re.DOTALL)
-    text = re.sub(r'renvoi_syn.*$', '', text)
-    text = re.sub(r'\binv\.\s*invariable\s*250\b', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def extract_definition(soup):
-    """Extrait la definition principale."""
+def normalize_term(term):
+    """Normalise un terme (sans accents, majuscules)."""
+    normalized = unicodedata.normalize('NFD', term)
+    without_accents = ''.join(c for c in normalized if unicodedata.category(c) != 'Mn')
+    return without_accents.upper()
+
+def scrape_abbreviations_com(term):
+    """Scrape Abbreviations.com pour les abreviations mondiales."""
+    url = f"https://www.abbreviations.com/{quote(term)}"
+    
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException:
+        return None
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    definitions = []
+    
+    tables = soup.find_all('table', class_='tdata')
+    for table in tables:
+        rows = table.find_all('tr')
+        for row in rows:
+            cells = row.find_all('td')
+            if len(cells) >= 2:
+                abbr = cells[0].get_text(strip=True)
+                meaning = cells[1].get_text(strip=True)
+                if meaning and abbr.upper() == term.upper():
+                    category_cell = cells[2] if len(cells) > 2 else None
+                    category = category_cell.get_text(strip=True) if category_cell else None
+                    definitions.append({
+                        "definition": meaning,
+                        "categorie": category
+                    })
+    
+    results_div = soup.find_all('p', class_='desc')
+    for p in results_div:
+        text = p.get_text(strip=True)
+        if text and len(text) > 3:
+            definitions.append({"definition": text})
+    
+    if definitions:
+        return {
+            "success": True,
+            "terme": term.upper(),
+            "source": "Abbreviations.com",
+            "definitions": definitions[:10],
+            "url": url
+        }
+    
+    return None
+
+def scrape_acronym_finder(term):
+    """Scrape Acronym Finder pour les acronymes."""
+    url = f"https://www.acronymfinder.com/{quote(term)}.html"
+    
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException:
+        return None
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    definitions = []
+    
+    result_table = soup.find('table', class_='result-list')
+    if result_table:
+        rows = result_table.find_all('tr')
+        for row in rows:
+            cells = row.find_all('td')
+            if len(cells) >= 2:
+                meaning_cell = cells[1] if len(cells) > 1 else cells[0]
+                meaning = meaning_cell.get_text(strip=True)
+                if meaning:
+                    category_cell = cells[2] if len(cells) > 2 else None
+                    category = category_cell.get_text(strip=True) if category_cell else None
+                    definitions.append({
+                        "definition": meaning,
+                        "categorie": category
+                    })
+    
+    if not definitions:
+        all_results = soup.find_all(['td', 'div'], class_=lambda x: x and 'meaning' in str(x).lower())
+        for result in all_results:
+            text = result.get_text(strip=True)
+            if text and len(text) > 3:
+                definitions.append({"definition": text})
+    
+    if definitions:
+        return {
+            "success": True,
+            "terme": term.upper(),
+            "source": "Acronym Finder",
+            "definitions": definitions[:10],
+            "url": url
+        }
+    
+    return None
+
+def scrape_all_acronyms(term):
+    """Scrape All Acronyms."""
+    url = f"https://www.allacronyms.com/{quote(term)}"
+    
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException:
+        return None
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    definitions = []
+    
+    meaning_divs = soup.find_all('div', class_='meaning')
+    for div in meaning_divs:
+        text = div.get_text(strip=True)
+        if text and len(text) > 2:
+            definitions.append({"definition": text})
+    
+    if not definitions:
+        links = soup.find_all('a', href=True)
+        for link in links:
+            if f'/{term.lower()}/' in link.get('href', '').lower():
+                parent = link.find_parent('div') or link.find_parent('li')
+                if parent:
+                    text = parent.get_text(strip=True)
+                    text = re.sub(rf'^{re.escape(term)}\s*', '', text, flags=re.IGNORECASE)
+                    if text and len(text) > 3:
+                        definitions.append({"definition": text})
+    
+    if definitions:
+        return {
+            "success": True,
+            "terme": term.upper(),
+            "source": "All Acronyms",
+            "definitions": definitions[:10],
+            "url": url
+        }
+    
+    return None
+
+def extract_usito_definition(soup):
+    """Extrait la definition USITO."""
     main_content = soup.find('main') or soup.find('body')
     if not main_content:
         return None
@@ -46,79 +192,13 @@ def extract_definition(soup):
     
     return None
 
-def extract_etymology(soup):
-    """Extrait l'etymologie."""
-    full_text = soup.get_text()
-    match = re.search(r'ÉTYMOLOGIE\s*(\d{4}[^O]*?)(?:ORTHOGRAPHE|$)', full_text, re.DOTALL)
-    if match:
-        etym = match.group(1).strip()
-        etym = re.sub(r'\s+', ' ', etym)
-        return etym
-    return None
-
-def extract_synonyms(soup):
-    """Extrait les synonymes."""
-    synonyms = []
-    links = soup.find_all('a')
-    for link in links:
-        href = link.get('href', '')
-        if '/définitions/' in href:
-            text = link.get_text(strip=True)
-            if text and len(text) > 1 and text not in synonyms:
-                parent_text = link.parent.get_text() if link.parent else ''
-                if '⇒' in parent_text or 'synonyme' in parent_text.lower():
-                    synonyms.append(text)
-    return synonyms[:5]
-
-def extract_grammar_info(soup):
-    """Extrait les informations grammaticales."""
-    full_text = soup.get_text()
-    info = {}
-    
-    if 'n.f.' in full_text or 'nom féminin' in full_text.lower():
-        info['genre'] = 'feminin'
-        info['type'] = 'nom'
-    elif 'n.m.' in full_text or 'nom masculin' in full_text.lower():
-        info['genre'] = 'masculin'
-        info['type'] = 'nom'
-    
-    if 'inv.' in full_text or 'invariable' in full_text.lower():
-        info['nombre'] = 'invariable'
-    
-    return info if info else None
-
-def extract_example(soup):
-    """Extrait un exemple d'utilisation."""
-    full_text = soup.get_text()
-    match = re.search(r'«(.+?)»', full_text)
-    if match:
-        example = match.group(1).strip()
-        example = re.sub(r'\s+', ' ', example)
-        return example
-    return None
-
-def extract_pronunciation(soup):
-    """Extrait la prononciation phonetique."""
-    full_text = soup.get_text()
-    match = re.search(r'\[([a-zɛɔɑ̃œ̃ɛ̃ʒʃɲŋəø]+)\]', full_text, re.IGNORECASE)
-    if match:
-        return match.group(1)
-    return None
-
-def normalize_term(term):
-    """Normalise un terme pour la comparaison (sans accents, majuscules)."""
-    import unicodedata
-    normalized = unicodedata.normalize('NFD', term)
-    without_accents = ''.join(c for c in normalized if unicodedata.category(c) != 'Mn')
-    return without_accents.upper()
-
-def search_in_acronyms(term, headers):
-    """Cherche le terme dans la liste des acronymes USITO."""
+def search_usito_acronyms(term):
+    """Cherche dans les acronymes USITO."""
     first_letter = term[0].upper()
     url = f"https://usito.usherbrooke.ca/index/asas/acronymes/{first_letter}"
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
     except requests.exceptions.RequestException:
         return None
@@ -136,145 +216,112 @@ def search_in_acronyms(term, headers):
                 full_text = parent.get_text(separator=' ', strip=True)
                 definition_match = re.search(rf'{re.escape(link_text)}\s+(.+)', full_text, re.IGNORECASE)
                 if definition_match:
-                    definition = definition_match.group(1).strip()
-                    return {
-                        "success": True,
-                        "terme": link_text,
-                        "type": "acronyme",
-                        "definition": definition,
-                        "url": f"https://usito.usherbrooke.ca{href}"
-                    }
+                    return definition_match.group(1).strip()
     
     return None
 
-def search_in_sigles(term, headers):
-    """Cherche le terme dans la liste des sigles USITO."""
-    first_letter = term[0].upper()
-    url = f"https://usito.usherbrooke.ca/index/asas/sigles/{first_letter}"
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-    except requests.exceptions.RequestException:
-        return None
-    
-    soup = BeautifulSoup(response.text, 'html.parser')
-    normalized_term = normalize_term(term)
-    
-    for link in soup.find_all('a'):
-        href = link.get('href', '')
-        link_text = link.get_text(strip=True)
-        
-        if normalize_term(link_text) == normalized_term and '/annexes/' in href:
-            parent = link.parent
-            if parent:
-                full_text = parent.get_text(separator=' ', strip=True)
-                definition_match = re.search(rf'{re.escape(link_text)}\s+(.+)', full_text, re.IGNORECASE)
-                if definition_match:
-                    definition = definition_match.group(1).strip()
-                    return {
-                        "success": True,
-                        "terme": link_text,
-                        "type": "sigle",
-                        "definition": definition,
-                        "url": f"https://usito.usherbrooke.ca{href}"
-                    }
-    
-    return None
-
-def scrape_usito(abbreviation):
-    """
-    Scrape the USITO dictionary for a given abbreviation/term.
-    Returns structured and clean data.
-    """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-    }
-    
-    encoded_term = quote(abbreviation, safe='')
+def scrape_usito(term):
+    """Scrape USITO (dictionnaire quebecois)."""
+    encoded_term = quote(term, safe='')
     url = f"https://usito.usherbrooke.ca/définitions/{encoded_term}"
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        return {"error": f"Erreur de connexion: {str(e)}", "success": False}
+    except requests.exceptions.RequestException:
+        return None
     
     soup = BeautifulSoup(response.text, 'html.parser')
     
     for script in soup(["script", "style", "nav", "footer", "header"]):
         script.decompose()
     
-    result = {
-        "success": True,
-        "terme": abbreviation.upper(),
-        "url": url,
-    }
+    definition = extract_usito_definition(soup)
     
-    definition = extract_definition(soup)
+    if not definition:
+        definition = search_usito_acronyms(term)
+    
     if definition:
-        result["definition"] = definition
-    
-    pronunciation = extract_pronunciation(soup)
-    if pronunciation:
-        result["prononciation"] = pronunciation
-    
-    grammar = extract_grammar_info(soup)
-    if grammar:
-        result["grammaire"] = grammar
-    
-    etymology = extract_etymology(soup)
-    if etymology:
-        result["etymologie"] = etymology
-    
-    example = extract_example(soup)
-    if example:
-        result["exemple"] = example
-    
-    synonyms = extract_synonyms(soup)
-    if synonyms:
-        result["synonymes"] = synonyms
-    
-    if "definition" not in result:
-        acronym_result = search_in_acronyms(abbreviation, headers)
-        if acronym_result:
-            return acronym_result
+        full_text = soup.get_text()
+        etymology = None
+        match = re.search(r'ÉTYMOLOGIE\s*(\d{4}[^O]*?)(?:ORTHOGRAPHE|$)', full_text, re.DOTALL)
+        if match:
+            etymology = re.sub(r'\s+', ' ', match.group(1).strip())
         
-        sigle_result = search_in_sigles(abbreviation, headers)
-        if sigle_result:
-            return sigle_result
+        example = None
+        match = re.search(r'«(.+?)»', full_text)
+        if match:
+            example = re.sub(r'\s+', ' ', match.group(1).strip())
         
-        result["message"] = "Terme non trouve dans le dictionnaire USITO"
-        result["success"] = False
+        result = {
+            "success": True,
+            "terme": term.upper(),
+            "source": "USITO (Quebec)",
+            "definition": definition,
+            "url": url
+        }
+        
+        if etymology:
+            result["etymologie"] = etymology
+        if example:
+            result["exemple"] = example
+        
+        return result
     
-    return result
+    return None
+
+def search_all_sources(term):
+    """Recherche dans toutes les sources disponibles."""
+    all_results = []
+    
+    usito_result = scrape_usito(term)
+    if usito_result:
+        all_results.append(usito_result)
+    
+    abbr_result = scrape_abbreviations_com(term)
+    if abbr_result:
+        all_results.append(abbr_result)
+    
+    acronym_result = scrape_acronym_finder(term)
+    if acronym_result:
+        all_results.append(acronym_result)
+    
+    allacronyms_result = scrape_all_acronyms(term)
+    if allacronyms_result:
+        all_results.append(allacronyms_result)
+    
+    return all_results
 
 @app.route('/')
 def home():
     """Page d'accueil avec documentation de l'API"""
     return jsonify({
-        "message": "API de recherche d'abreviations USITO",
-        "usage": {
-            "endpoint": "/recherche",
-            "method": "GET",
-            "parameter": "abreviation",
-            "exemple": "/recherche?abreviation=ONG"
-        },
-        "description": "Cette API permet de rechercher des abreviations, acronymes et sigles dans le dictionnaire USITO de l'Universite de Sherbrooke.",
-        "champs_retournes": [
-            "terme", "definition", "prononciation", "grammaire", 
-            "etymologie", "exemple", "synonymes", "type"
-        ]
+        "message": "API de recherche d'abreviations multilingue",
+        "sources": [
+            "USITO (Quebec/France)",
+            "Abbreviations.com (Mondial)",
+            "Acronym Finder (Mondial)",
+            "All Acronyms (Mondial)"
+        ],
+        "endpoints": {
+            "/recherche": {
+                "method": "GET",
+                "params": "abreviation",
+                "description": "Recherche dans USITO uniquement",
+                "exemple": "/recherche?abreviation=ONG"
+            },
+            "/recherche/global": {
+                "method": "GET",
+                "params": "abreviation",
+                "description": "Recherche dans toutes les sources mondiales",
+                "exemple": "/recherche/global?abreviation=NASA"
+            }
+        }
     })
 
 @app.route('/recherche')
 def recherche():
-    """
-    Route GET pour rechercher une abreviation.
-    Usage: /recherche?abreviation=ONG
-    """
+    """Recherche dans USITO."""
     abreviation = request.args.get('abreviation', '').strip()
     
     if not abreviation:
@@ -286,10 +333,52 @@ def recherche():
     
     result = scrape_usito(abreviation)
     
-    if not result.get("success", False):
-        return jsonify(result), 404
+    if not result:
+        acronym_def = search_usito_acronyms(abreviation)
+        if acronym_def:
+            result = {
+                "success": True,
+                "terme": abreviation.upper(),
+                "source": "USITO (Quebec)",
+                "definition": acronym_def
+            }
     
-    return jsonify(result)
+    if result:
+        return jsonify(result)
+    
+    return jsonify({
+        "success": False,
+        "terme": abreviation.upper(),
+        "message": "Terme non trouve dans USITO. Essayez /recherche/global pour une recherche mondiale."
+    }), 404
+
+@app.route('/recherche/global')
+def recherche_global():
+    """Recherche dans toutes les sources mondiales."""
+    abreviation = request.args.get('abreviation', '').strip()
+    
+    if not abreviation:
+        return jsonify({
+            "error": "Parametre 'abreviation' manquant",
+            "usage": "/recherche/global?abreviation=NASA",
+            "success": False
+        }), 400
+    
+    results = search_all_sources(abreviation)
+    
+    if results:
+        return jsonify({
+            "success": True,
+            "terme": abreviation.upper(),
+            "nombre_sources": len(results),
+            "resultats": results
+        })
+    
+    return jsonify({
+        "success": False,
+        "terme": abreviation.upper(),
+        "message": "Aucun resultat trouve dans les sources disponibles."
+    }), 404
 
 @app.route('/health')
 def health():
